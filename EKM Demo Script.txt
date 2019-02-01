@@ -1,0 +1,144 @@
+*** Backup/Restore
+
+CREATE MASTER KEY
+
+BACKUP MASTER KEY
+
+CREATE CERTIFICATE
+
+BACKUP CERTIFICATE
+
+ALTER SERVICE MASTER KEY
+
+BACKUP SERVICE MASTER KEY
+
+RESTORE MASTER KEY...FORCE
+
+*** Rotation
+
+1. Column-level
+
+CREATE CERTIFICATE
+
+ALTER SYMMETRIC KEY...ADD
+
+ALTER SYMMETRIC KEY...DROP
+
+2. TDE
+
+CREATE CERTIFICATE
+
+ALTER DATABASE ENCRYPTION KEY
+
+*** Azure Key Vault
+
+Prerequisites:
+- Azure Active Directory
+- Visual Studio C++ Redistributable (VS2013 or VS2015)
+
+1. Add an application to AAD
+	- Go to AAD
+	- Click App Registrations
+	- Fill in required values
+		- Type: Web App/API
+		- Sign-on URL: Can be anything
+	- Select new app in list
+		- Documentation refers to "Client ID" - Now called Application ID
+	- Add a key (client secret)
+		- Term - 1 or 2 years
+		- Copy and paste the secret *now* - Can't retrieve it later
+			- Prep 1 - mel0v3f8Gm02yz92U22dHBJhDB4xbPLudCOXBymaGFw=
+2. Create an Azure Key Vault
+	- Set basic properties
+		- Pricing tier: Standard or Premium - Premium uses HSM
+	- Add the application created above to the AKV
+		- Minimum permissions: Get, List, Wrap Key, Unwrap Key
+		- Will need the Application ID and secret created earlier if not using Azure portal
+3. Create an asymmetric key
+	- Keys are 2048-bit RSA, either software-protected or hardware-protected (HSM)
+	- Key can be imported from external source
+		- Importing allows the private key to be escrowed
+		- Private keys created in AKV can never leave AKV
+	- AKV versions keys by default, but versioned keys cannot be versioned or rolled to be used with SQL
+4. Install SQL Server Connector
+	- https://www.microsoft.com/en-us/download/details.aspx?id=45344
+	- NOTE: Feb 2018 version has a bug: https://sysadmin-monkey.net/2018/03/errors-with-february-2018-sql-connector-for-azure-key-vault/
+		- New registry key "HKLM\SOFTWARE\Microsoft\SQL Server Cryptographic Provider" required
+		- Give full access to SQL Server service account
+5. Configure SQL to use EKM
+	- Enable 'EKM provider enabled' option using sp_configure
+	- Create a cryptographic provider, pointed to the DLL installed in step 4
+
+USE master;
+EXECUTE sp_configure 'show advanced options', 1;
+RECONFIGURE;
+GO
+EXECUTE sp_configure 'EKM provider enabled', 1;
+RECONFIGURE;
+GO
+
+CREATE CRYPTOGRAPHIC PROVIDER kvMNPrep1
+	FROM FILE = 'C:\Program Files\SQL Server Connector for Microsoft Azure Key Vault\Microsoft.AzureKeyVaultService.EKM.dll';
+GO
+
+6. Create a credential to connect to the AKV
+	- Identity: Key Vault name
+	- Secret/Password: Application ID (no hyphens) + client secret from step 1
+	- Cryptographic provider: Name from step 5
+
+USE master;
+CREATE CREDENTIAL crd_kvSummitDemoPrep1
+	WITH IDENTITY = 'kvSummitDemoPrep1',
+		 SECRET = '7d6f22a49d3e4a6fae67af1b6d5e09efwfdscQtcnPJxrCfEsAMGWDaJo4SozDz9eqnDbR/wTSI='
+	FOR CRYPTOGRAPHIC PROVIDER kvSummitDemoPrep1;
+GO
+
+7. Add the credential to the login that will use the AKV
+	- Credential can only be mapped to one login
+	
+ALTER LOGIN [LAB\Administrator]
+	ADD CREDENTIAL crd_kvMNPrep1;
+GO
+
+8. Add the key from step 3 to SQL
+
+CREATE ASYMMETRIC KEY TestKey1
+	FROM PROVIDER kvSummitDemoPrep1
+	WITH PROVIDER_KEY_NAME = 'TestKey1',
+		 CREATION_DISPOSITION = OPEN_EXISTING;
+GO
+
+9. Create a new key from SQL
+	- Make sure the user in AKV has permissions - Error message is cryptic
+	*** NOT WORKING YET ***
+	
+CREATE ASYMMETRIC KEY TestKey2
+	FROM PROVIDER kvSummitDemoPrep1
+	WITH PROVIDER_KEY_NAME = 'TestKey2',
+		 ALGORITHM = RSA_2048,
+		 CREATION_DISPOSITION = CREATE_NEW;
+GO
+
+10. Use key with TDE
+	- Add a new credential
+	- Add a new login for the asymmetric key, then associate it with the credential
+
+USE master;
+CREATE CREDENTIAL crd_EkmTdeDemoPrep1
+	WITH IDENTITY = 'kvSummitDemoPrep1',
+		 SECRET = '7d6f22a49d3e4a6fae67af1b6d5e09efwfdscQtcnPJxrCfEsAMGWDaJo4SozDz9eqnDbR/wTSI='
+	FOR CRYPTOGRAPHIC PROVIDER kvSummitDemoPrep1;
+CREATE LOGIN ekmTdeDemoPrep1
+	FROM ASYMMETRIC KEY TestKey1;
+ALTER LOGIN ekmTdeDemoPrep1
+	ADD CREDENTIAL crd_EkmTdeDemoPrep1;
+GO
+
+CREATE DATABASE ekmtdetest;
+GO
+
+USE ekmtdetest;
+CREATE DATABASE ENCRYPTION KEY
+	WITH ALGORITHM = AES_256
+	ENCRYPTION BY SERVER ASYMMETRIC KEY TestKey1;
+GO
